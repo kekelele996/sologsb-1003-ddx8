@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import { analyzeDocument } from '@/lib/markdown'
-import { seedConflicts, seedDocument, seedHistory } from '@/lib/seed'
+import { matchSuggestions } from '@/lib/translation-memory'
+import { seedConflicts, seedDocument, seedHistory, seedTranslationMemory } from '@/lib/seed'
 import type { GlossaryTerm, Segment } from '@/lib/types'
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -13,6 +14,12 @@ export const handlers = [
     const body = await request.json() as { segments: Segment[]; glossary: GlossaryTerm[] }
     await new Promise((resolve) => setTimeout(resolve, 320))
     return HttpResponse.json({ checkedAt: Date.now(), issues: analyzeDocument(body.segments, body.glossary) })
+  }),
+  http.post('/api/suggestions', async ({ request }) => {
+    const body = await request.json() as { segments: Segment[]; glossary: GlossaryTerm[] }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const suggestions = matchSuggestions(body.segments, seedTranslationMemory, body.glossary)
+    return HttpResponse.json({ matchedAt: Date.now(), suggestions })
   }),
   http.post('/api/draft', async ({ request }) => {
     const body = await request.json() as { documentId: string; segments: Segment[]; discussions: unknown[] }

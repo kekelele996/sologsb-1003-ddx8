@@ -44,10 +44,38 @@ export interface HistoryEntry {
   id: string
   segmentId: string
   author: string
-  action: 'edit' | 'confirm' | 'return' | 'resolve-conflict' | 'import' | 'discussion'
+  action: 'edit' | 'confirm' | 'return' | 'resolve-conflict' | 'import' | 'discussion' | 'apply-suggestion'
   before: string
   after: string
   createdAt: number
+}
+
+export interface TranslationMemoryEntry {
+  id: string
+  sourceText: string
+  targetText: string
+  sourceDocument: string
+  sourceSegmentLabel?: string
+  author: string
+  confirmedAt: number
+}
+
+export type SuggestionDecision = 'pending' | 'accepted' | 'rejected'
+
+export interface TranslationSuggestion {
+  id: string
+  segmentId: string
+  entryId: string
+  sourceText: string
+  targetText: string
+  sourceDocument: string
+  sourceSegmentLabel?: string
+  author: string
+  confirmedAt: number
+  glossaryConflict: boolean
+  conflictTerms: string[]
+  decision: SuggestionDecision
+  decidedAt?: number
 }
 
 export interface TranslationConflict {

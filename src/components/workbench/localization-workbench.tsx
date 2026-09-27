@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
-  AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCheck, ChevronLeft, ChevronRight,
+  AlertCircle, ArrowDown, ArrowUp, BookOpen, BrainCircuit, Check, CheckCheck, ChevronLeft, ChevronRight,
   CircleAlert, Cloud, CloudOff, Code2, Download, FileText, GitCompare, History, Import,
   Languages, Link2, Loader2, MessageSquare, RefreshCw, RotateCcw, RotateCw, Save, Search,
   Send, ShieldCheck, Sparkles, Undo2, UndoDot, Variable, X,
@@ -17,13 +17,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { analyzeDocument, extractVariables, parseMarkdown, renderTargetMarkdown } from '@/lib/markdown'
 import { seedConflicts, seedDiscussions, seedDocument, seedGlossary, seedHistory, seedSegments } from '@/lib/seed'
-import type { Discussion, GlossaryTerm, HistoryEntry, Segment, SegmentStatus, TranslationConflict, TranslationIssue } from '@/lib/types'
+import type { Discussion, GlossaryTerm, HistoryEntry, Segment, SegmentStatus, TranslationConflict, TranslationIssue, TranslationSuggestion } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
 const DRAFT_KEY = 'sologsb-1003-localization-draft-v1'
 const kindIcon = { heading: <FileText className="h-3.5 w-3.5" />, paragraph: <FileText className="h-3.5 w-3.5" />, code: <Code2 className="h-3.5 w-3.5" />, link: <Link2 className="h-3.5 w-3.5" />, variable: <Variable className="h-3.5 w-3.5" /> }
 const kindLabel: Record<Segment['kind'], string> = { heading: '标题', paragraph: '段落', code: '代码块', link: '链接', variable: '占位符' }
 const statusLabel: Record<SegmentStatus, string> = { draft: '草稿', 'needs-work': '待处理', confirmed: '已确认', returned: '已退回' }
+const historyActionLabel: Record<HistoryEntry['action'], string> = {
+  edit: '编辑', confirm: '确认', return: '退回', 'resolve-conflict': '解决冲突', import: '导入', discussion: '讨论', 'apply-suggestion': '采用记忆译文',
+}
 const statusClass: Record<SegmentStatus, string> = {
   draft: 'bg-slate-100 text-slate-700', 'needs-work': 'bg-amber-100 text-amber-800',
   confirmed: 'bg-emerald-100 text-emerald-800', returned: 'bg-red-100 text-red-800',
@@ -36,15 +39,19 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 interface EditorSnapshot {
   segments: Segment[]
   discussions: Discussion[]
+  suggestions: TranslationSuggestion[]
 }
 
 export function LocalizationWorkbench() {
   const fileInput = useRef<HTMLInputElement>(null)
+  const initialLookupDone = useRef(false)
   const [segments, setSegments] = useState<Segment[]>(seedSegments)
   const [glossary, setGlossary] = useState<GlossaryTerm[]>(seedGlossary)
   const [discussions, setDiscussions] = useState<Discussion[]>(seedDiscussions)
   const [history, setHistory] = useState<HistoryEntry[]>(seedHistory)
   const [conflicts, setConflicts] = useState<TranslationConflict[]>(seedConflicts)
+  const [suggestions, setSuggestions] = useState<TranslationSuggestion[]>([])
+  const [lookingUp, setLookingUp] = useState(false)
   const [checkedIssues, setCheckedIssues] = useState<TranslationIssue[] | null>(null)
   const [selectedSegmentId, setSelectedSegmentId] = useState('seg-05')
   const [mode, setMode] = useState<'translate' | 'review'>('translate')
@@ -105,7 +112,7 @@ export function LocalizationWorkbench() {
     },
     onSuccess: () => {
       setDirty(false)
-      try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history })) } catch { /* storage may be unavailable */ }
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history, suggestions })) } catch { /* storage may be unavailable */ }
     },
   })
   const reviewMutation = useMutation({
@@ -113,6 +120,13 @@ export function LocalizationWorkbench() {
       const response = await fetch('/api/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       if (!response.ok) throw new Error('review failed')
       return response.json()
+    },
+  })
+  const suggestionMutation = useMutation({
+    mutationFn: async (payload: { segments: Segment[]; glossary: GlossaryTerm[] }) => {
+      const response = await fetch('/api/suggestions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      if (!response.ok) throw new Error('suggestion lookup failed')
+      return response.json() as Promise<{ matchedAt: number; suggestions: TranslationSuggestion[] }>
     },
   })
 
@@ -135,6 +149,12 @@ export function LocalizationWorkbench() {
   const progress = segments.length ? Math.round((confirmedCount / segments.length) * 100) : 0
   const filteredGlossary = glossary.filter((term) => `${term.source} ${term.target}`.toLowerCase().includes(glossarySearch.toLowerCase()))
   const selectedDiscussions = discussions.filter((discussion) => discussion.segmentId === selectedSegment?.id)
+  const suggestionMap = useMemo(() => suggestions.reduce<Record<string, TranslationSuggestion>>((map, suggestion) => {
+    map[suggestion.segmentId] = suggestion
+    return map
+  }, {}), [suggestions])
+  const pendingSuggestions = suggestions.filter((suggestion) => suggestion.decision === 'pending')
+  const pendingConflictCount = pendingSuggestions.filter((suggestion) => suggestion.glossaryConflict).length
   const mockConnected = documentQuery.isFetched && historyQuery.isFetched && conflictQuery.isFetched
 
   useEffect(() => {
@@ -142,12 +162,14 @@ export function LocalizationWorkbench() {
     try {
       const raw = localStorage.getItem(DRAFT_KEY)
       if (raw) {
-        const draft = JSON.parse(raw) as { segments: Segment[]; discussions: Discussion[]; glossary: GlossaryTerm[]; history: HistoryEntry[] }
+        const draft = JSON.parse(raw) as { segments: Segment[]; discussions: Discussion[]; glossary: GlossaryTerm[]; history: HistoryEntry[]; suggestions?: TranslationSuggestion[] }
         if (draft.segments?.length) {
           setSegments(draft.segments)
           setDiscussions(draft.discussions ?? seedDiscussions)
           setGlossary(draft.glossary ?? seedGlossary)
           setHistory(draft.history ?? seedHistory)
+          setSuggestions(draft.suggestions ?? [])
+          initialLookupDone.current = true
         }
       }
     } catch { /* start from seed */ }
@@ -156,8 +178,8 @@ export function LocalizationWorkbench() {
 
   useEffect(() => {
     if (!hydrated) return
-    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history })) } catch { /* storage may be unavailable */ }
-  }, [discussions, glossary, history, hydrated, segments])
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history, suggestions })) } catch { /* storage may be unavailable */ }
+  }, [discussions, glossary, history, hydrated, segments, suggestions])
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -169,7 +191,33 @@ export function LocalizationWorkbench() {
     return () => window.removeEventListener('beforeunload', beforeUnload)
   }, [dirty])
 
-  const snapshot = (): EditorSnapshot => ({ segments: clone(segments), discussions: clone(discussions) })
+  // 首次打开内置示例文档时同样演示导入查找；恢复草稿或已查找过时跳过。
+  useEffect(() => {
+    if (!hydrated || initialLookupDone.current) return
+    initialLookupDone.current = true
+    const run = async (attempt = 0) => {
+      setLookingUp(true)
+      try {
+        const data = await suggestionMutation.mutateAsync({ segments: seedSegments, glossary: seedGlossary })
+        const conflictIds = new Set(data.suggestions.filter((item) => item.glossaryConflict).map((item) => item.segmentId))
+        // 仅更新仍处于初始状态（未翻译且状态未变）的片段，避免覆盖用户已开始的编辑。
+        setSegments((current) => current.map((segment) => {
+          if (!conflictIds.has(segment.id) || segment.targetText.trim() || segment.status !== 'draft') return segment
+          return { ...segment, status: 'needs-work' as const, note: '记忆译文与当前术语表译法冲突，待译者处理。' }
+        }))
+        setSuggestions(data.suggestions)
+      } catch {
+        // MSW worker 注册可能晚于首次请求，短暂重试一次。
+        if (attempt < 1) setTimeout(() => void run(attempt + 1), 600)
+      } finally {
+        setLookingUp(false)
+      }
+    }
+    void run()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated])
+
+  const snapshot = (): EditorSnapshot => ({ segments: clone(segments), discussions: clone(discussions), suggestions: clone(suggestions) })
   const pushHistoryEntry = (segmentId: string, action: HistoryEntry['action'], before: string, after: string, author = '当前用户') => {
     setHistory((current) => [{ id: `history-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, segmentId, author, action, before, after, createdAt: Date.now() }, ...current])
   }
@@ -178,18 +226,19 @@ export function LocalizationWorkbench() {
     setFuture([])
     setSegments(next.segments)
     setDiscussions(next.discussions)
+    setSuggestions(next.suggestions)
     setCheckedIssues(null)
     if (markDirty) setDirty(true)
   }
   const updateTarget = (segment: Segment, targetText: string) => {
     const next = segments.map((item) => item.id === segment.id ? { ...item, targetText, status: item.status === 'confirmed' ? 'draft' as const : item.status } : item)
-    replaceState({ segments: next, discussions: clone(discussions) })
+    replaceState({ segments: next, discussions: clone(discussions), suggestions: clone(suggestions) })
   }
   const updateStatus = (segmentId: string, status: SegmentStatus, action: HistoryEntry['action'] = status === 'confirmed' ? 'confirm' : 'return') => {
     const segment = segments.find((item) => item.id === segmentId)
     if (!segment) return
     const next = segments.map((item) => item.id === segmentId ? { ...item, status } : item)
-    replaceState({ segments: next, discussions: clone(discussions) })
+    replaceState({ segments: next, discussions: clone(discussions), suggestions: clone(suggestions) })
     pushHistoryEntry(segmentId, action, segment.targetText, segment.targetText)
     setSelectedForReturn((current) => { const copy = new Set(current); copy.delete(segmentId); return copy })
   }
@@ -200,6 +249,7 @@ export function LocalizationWorkbench() {
     setPast((current) => current.slice(0, -1))
     setSegments(previous.segments)
     setDiscussions(previous.discussions)
+    setSuggestions(previous.suggestions)
     setCheckedIssues(null)
     setDirty(true)
   }
@@ -210,6 +260,7 @@ export function LocalizationWorkbench() {
     setFuture((current) => current.slice(1))
     setSegments(next.segments)
     setDiscussions(next.discussions)
+    setSuggestions(next.suggestions)
     setCheckedIssues(null)
     setDirty(true)
   }
@@ -227,7 +278,7 @@ export function LocalizationWorkbench() {
   const addDiscussion = () => {
     if (!selectedSegment || !discussionDraft.trim()) return
     const nextDiscussion: Discussion = { id: `discussion-${Date.now()}`, segmentId: selectedSegment.id, author: '译者 · 当前用户', body: discussionDraft.trim(), resolved: false, createdAt: Date.now() }
-    replaceState({ segments: clone(segments), discussions: [nextDiscussion, ...discussions] })
+    replaceState({ segments: clone(segments), discussions: [nextDiscussion, ...discussions], suggestions: clone(suggestions) })
     pushHistoryEntry(selectedSegment.id, 'discussion', '', nextDiscussion.body)
     setDiscussionDraft('')
   }
@@ -235,7 +286,7 @@ export function LocalizationWorkbench() {
     if (!selectedForReturn.size) return
     const ids = Array.from(selectedForReturn)
     const next = segments.map((segment) => ids.includes(segment.id) ? { ...segment, status: 'returned' as const } : segment)
-    replaceState({ segments: next, discussions: clone(discussions) })
+    replaceState({ segments: next, discussions: clone(discussions), suggestions: clone(suggestions) })
     ids.forEach((id) => pushHistoryEntry(id, 'return', returnReason, `退回原因：${returnReason}`, '审校 · 当前用户'))
     void reviewMutation.mutateAsync({ action: 'bulk-return', segmentIds: ids, reason: returnReason })
     setSelectedForReturn(new Set())
@@ -244,19 +295,88 @@ export function LocalizationWorkbench() {
     const targetText = strategy === 'local' ? conflict.localText : conflict.remoteText
     const segment = segments.find((item) => item.id === conflict.segmentId)
     const next = segments.map((item) => item.id === conflict.segmentId ? { ...item, targetText, status: 'draft' as const } : item)
-    replaceState({ segments: next, discussions: clone(discussions) })
+    replaceState({ segments: next, discussions: clone(discussions), suggestions: clone(suggestions) })
     if (segment) pushHistoryEntry(segment.id, 'resolve-conflict', segment.targetText, targetText, strategy === 'local' ? '保留本地' : conflict.remoteAuthor)
     setConflicts((current) => current.filter((item) => item.id !== conflict.id))
   }
+  /** 调用模拟接口在翻译记忆中查找已确认译文；命中术语冲突的片段置为“待处理”。 */
+  const lookupSuggestions = async (baseSegments: Segment[], nextGlossary = glossary) => {
+    setLookingUp(true)
+    try {
+      const data = await suggestionMutation.mutateAsync({ segments: baseSegments, glossary: nextGlossary })
+      const conflictIds = new Set(data.suggestions.filter((item) => item.glossaryConflict).map((item) => item.segmentId))
+      const withStatus = baseSegments.map((segment) =>
+        conflictIds.has(segment.id) ? { ...segment, status: 'needs-work' as const, note: '记忆译文与当前术语表译法冲突，待译者处理。' } : segment,
+      )
+      return { segments: withStatus, suggestions: data.suggestions }
+    } catch {
+      // MSW worker 尚未就绪或接口异常时退化为无建议，不阻断导入。
+      return { segments: baseSegments, suggestions: [] as TranslationSuggestion[] }
+    } finally {
+      setLookingUp(false)
+    }
+  }
+
+  const decideSuggestion = (suggestion: TranslationSuggestion, decision: 'accepted' | 'rejected') => {
+    const segment = segments.find((item) => item.id === suggestion.segmentId)
+    if (!segment) return
+    const accepted = decision === 'accepted'
+    const nextSegments = segments.map((item) => item.id === suggestion.segmentId
+      ? {
+          ...item,
+          targetText: accepted ? suggestion.targetText : item.targetText,
+          // 接受冲突旧译文仍需按现行术语表修订；拒绝则回到普通草稿，保留原文。
+          status: accepted
+            ? (suggestion.glossaryConflict ? 'needs-work' as const : 'draft' as const)
+            : 'draft' as const,
+          note: item.note === '记忆译文与当前术语表译法冲突，待译者处理。' && !accepted ? '' : item.note,
+        }
+      : item)
+    const nextSuggestions = suggestions.map((item) => item.id === suggestion.id ? { ...item, decision, decidedAt: Date.now() } : item)
+    replaceState({ segments: nextSegments, discussions: clone(discussions), suggestions: nextSuggestions })
+    if (accepted) {
+      pushHistoryEntry(
+        segment.id,
+        'apply-suggestion',
+        segment.targetText,
+        suggestion.targetText,
+        `当前用户 · 采纳自 ${suggestion.sourceDocument}${suggestion.author ? `（${suggestion.author} 确认）` : ''}`,
+      )
+    }
+  }
+
+  const resetSuggestion = (suggestion: TranslationSuggestion) => {
+    const nextSegments = segments.map((item) => {
+      if (item.id !== suggestion.segmentId) return item
+      return {
+        ...item,
+        targetText: item.targetText === suggestion.targetText ? '' : item.targetText,
+        status: suggestion.glossaryConflict ? 'needs-work' as const : 'draft' as const,
+        note: suggestion.glossaryConflict ? '记忆译文与当前术语表译法冲突，待译者处理。' : item.note,
+      }
+    })
+    const nextSuggestions = suggestions.map((item) => item.id === suggestion.id
+      ? {
+          id: item.id, segmentId: item.segmentId, entryId: item.entryId, sourceText: item.sourceText,
+          targetText: item.targetText, sourceDocument: item.sourceDocument, sourceSegmentLabel: item.sourceSegmentLabel,
+          author: item.author, confirmedAt: item.confirmedAt, glossaryConflict: item.glossaryConflict,
+          conflictTerms: item.conflictTerms, decision: 'pending' as const,
+        }
+      : item)
+    replaceState({ segments: nextSegments, discussions: clone(discussions), suggestions: nextSuggestions })
+  }
+
   const importMarkdown = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
     const imported = parseMarkdown(await file.text())
+    event.target.value = ''
     if (!imported.length) return
-    replaceState({ segments: imported, discussions: [] })
+    // 导入时查找已确认译文：源文忽略多余空白和大小写后相同即给出建议。
+    const { segments: withSuggestions, suggestions: matched } = await lookupSuggestions(imported)
+    replaceState({ segments: withSuggestions, discussions: [], suggestions: matched })
     pushHistoryEntry(imported[0].id, 'import', '', file.name)
     setSelectedSegmentId(imported[0].id)
-    event.target.value = ''
   }
   const exportMarkdown = () => {
     const blob = new Blob([renderTargetMarkdown(segments)], { type: 'text/markdown;charset=utf-8' })
@@ -321,6 +441,8 @@ export function LocalizationWorkbench() {
           <span><b className="text-slate-900">{translatedCount}</b> 已翻译</span>
           <span className="flex items-center gap-1"><CircleAlert className="h-3.5 w-3.5 text-amber-600" /><b className="text-slate-900">{issues.length}</b> 个检查结果</span>
           <span className="flex items-center gap-1"><CheckCheck className="h-3.5 w-3.5 text-emerald-600" /><b className="text-slate-900">{confirmedCount}</b> 已确认</span>
+          {lookingUp && <span className="flex items-center gap-1 text-blue-600"><Loader2 className="h-3.5 w-3.5 animate-spin" />正在查找记忆译文…</span>}
+          {!lookingUp && pendingSuggestions.length > 0 && <span className="flex items-center gap-1"><BrainCircuit className="h-3.5 w-3.5 text-indigo-600" /><b className="text-slate-900">{pendingSuggestions.length}</b> 条记忆建议{pendingConflictCount > 0 && <Badge variant="warning" className="px-1.5 py-0 text-[10px]">{pendingConflictCount} 条术语冲突</Badge>}</span>}
           <div className="ml-auto flex min-w-[220px] items-center gap-3"><span>审校进度 {progress}%</span><Progress value={progress} className="w-36" /></div>
           <Button size="sm" variant="secondary" onClick={() => checkMutation.mutate()} disabled={checkMutation.isPending}>{checkMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}运行本地术语检查</Button>
           <Button size="sm" variant="outline" onClick={exportMarkdown}><Download className="h-4 w-4" />导出译文</Button>
@@ -367,15 +489,19 @@ export function LocalizationWorkbench() {
 
           {filteredSegments.map((segment) => {
             const segmentIssues = issueMap[segment.id] ?? []
+            const suggestion = suggestionMap[segment.id]
             const isSelected = selectedSegment?.id === segment.id
             const isReturnSelected = selectedForReturn.has(segment.id)
             return (
-              <article id={`segment-${segment.id}`} key={segment.id} onClick={() => setSelectedSegmentId(segment.id)} className={cn('scroll-mt-32 overflow-hidden rounded-xl border bg-white shadow-sm transition', isSelected && 'ring-2 ring-blue-500/30', segment.status === 'returned' && 'border-red-200', segmentIssues.some((issue) => issue.severity === 'error') && 'border-red-200')}>
+              <article id={`segment-${segment.id}`} key={segment.id} onClick={() => setSelectedSegmentId(segment.id)} className={cn('scroll-mt-32 overflow-hidden rounded-xl border bg-white shadow-sm transition', isSelected && 'ring-2 ring-blue-500/30', segment.status === 'returned' && 'border-red-200', segmentIssues.some((issue) => issue.severity === 'error') && 'border-red-200', suggestion?.decision === 'pending' && suggestion.glossaryConflict && 'border-amber-300')}>
                 <header className="flex flex-wrap items-center gap-2 border-b bg-slate-50/80 px-3 py-2.5">
                   <input type="checkbox" checked={isReturnSelected} onChange={() => toggleReturnSelection(segment.id)} className="h-4 w-4 rounded border-slate-300 accent-blue-600" aria-label={`选择片段 ${segment.index}`} />
                   <span className="text-[11px] font-semibold text-slate-500">#{String(segment.index).padStart(2, '0')}</span>
                   <Badge variant="outline" className="gap-1 text-[10px]">{kindIcon[segment.kind]}{kindLabel[segment.kind]}</Badge>
                   <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-medium', statusClass[segment.status])}>{statusLabel[segment.status]}</span>
+                  {suggestion?.decision === 'pending' && <Badge variant={suggestion.glossaryConflict ? 'warning' : 'default'} className={cn('gap-1 text-[10px]', !suggestion.glossaryConflict && 'bg-indigo-100 text-indigo-800')}><BrainCircuit className="h-3 w-3" />{suggestion.glossaryConflict ? '记忆译文 · 术语冲突' : '记忆译文建议'}</Badge>}
+                  {suggestion?.decision === 'accepted' && <Badge variant="success" className="gap-1 text-[10px]"><Check className="h-3 w-3" />已采纳记忆译文</Badge>}
+                  {suggestion?.decision === 'rejected' && <Badge variant="secondary" className="gap-1 text-[10px]"><X className="h-3 w-3" />已忽略记忆译文</Badge>}
                   {segment.protectedTokens.length > 0 && <Badge variant="secondary" className="gap-1 text-[10px]"><Variable className="h-3 w-3" />{segment.protectedTokens.length} 个受保护标记</Badge>}
                   {!!segmentIssues.length && <Badge variant="destructive" className="ml-auto">{segmentIssues.length} 个问题</Badge>}
                   <div className={cn('flex gap-1.5', !segmentIssues.length && 'ml-auto')}>
@@ -392,6 +518,34 @@ export function LocalizationWorkbench() {
                     <div className="mb-2 flex items-center justify-between"><span className="text-[10px] font-semibold uppercase tracking-wider text-blue-500">简体中文 · Target</span>{mode === 'translate' ? <Badge variant="outline" className="text-[9px]">编辑中</Badge> : <Badge variant="secondary" className="text-[9px]">审校只读</Badge>}</div>
                     <Textarea id={`target-${segment.id}`} value={segment.targetText} readOnly={mode === 'review'} onChange={(event) => updateTarget(segment, event.target.value)} rows={Math.max(3, Math.ceil(segment.sourceText.length / 46))} className={cn('min-h-[84px] resize-y border-slate-200 bg-slate-50/40 text-sm leading-6 focus-visible:bg-white', segment.kind === 'code' && 'markdown-code text-xs')} placeholder="在此输入译文，或保留代码块原样…" />
                     {segment.protectedTokens.length > 0 && <div className="mt-2 flex flex-wrap gap-1">{segment.protectedTokens.map((token) => <code key={token} className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-700">{token}</code>)}</div>}
+                    {suggestion && suggestion.decision === 'pending' && (
+                      <div className={cn('mt-2.5 rounded-lg border p-2.5', suggestion.glossaryConflict ? 'border-amber-300 bg-amber-50' : 'border-indigo-200 bg-indigo-50/70')}>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <BrainCircuit className={cn('h-3.5 w-3.5', suggestion.glossaryConflict ? 'text-amber-600' : 'text-indigo-600')} />
+                          <span className={cn('text-[11px] font-semibold', suggestion.glossaryConflict ? 'text-amber-800' : 'text-indigo-800')}>
+                            {suggestion.glossaryConflict ? '记忆译文与当前术语表冲突，请处理' : '找到已确认译文'}
+                          </span>
+                          {suggestion.glossaryConflict && <Badge variant="warning" className="px-1.5 py-0 text-[10px]">待处理</Badge>}
+                          <span className="ml-auto flex items-center gap-1 text-[10px] text-slate-500"><FileText className="h-3 w-3" />来源：{suggestion.sourceDocument}{suggestion.sourceSegmentLabel ? ` · ${suggestion.sourceSegmentLabel}` : ''}</span>
+                        </div>
+                        <p className={cn('mt-1.5 rounded-md border border-dashed px-2.5 py-1.5 text-xs leading-5', suggestion.glossaryConflict ? 'border-amber-300 bg-white/70 text-amber-900 line-through decoration-amber-500/70' : 'border-indigo-200 bg-white/70 text-slate-800')}>{suggestion.targetText}</p>
+                        <p className="mt-1 text-[10px] text-slate-500">由 {suggestion.author} 于 {new Date(suggestion.confirmedAt).toLocaleDateString('zh-CN')} 确认{suggestion.glossaryConflict ? <>；冲突术语：{suggestion.conflictTerms.map((term) => `“${term}”`).join('、')}，现行译法见术语表</> : null}</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Button size="sm" className="h-7 px-2.5 text-[11px]" variant={suggestion.glossaryConflict ? 'outline' : 'default'} onClick={(event) => { event.stopPropagation(); decideSuggestion(suggestion, 'accepted') }}><Check className="h-3 w-3" />{suggestion.glossaryConflict ? '仍采纳（稍后修订）' : '采纳建议译文'}</Button>
+                          <Button size="sm" variant="ghost" className="h-7 px-2.5 text-[11px] text-slate-600" onClick={(event) => { event.stopPropagation(); decideSuggestion(suggestion, 'rejected') }}><X className="h-3 w-3" />拒绝，保留原文</Button>
+                        </div>
+                      </div>
+                    )}
+                    {suggestion && suggestion.decision !== 'pending' && (
+                      <div className={cn('mt-2.5 rounded-lg border px-2.5 py-2 text-[10px] leading-4', suggestion.decision === 'accepted' ? 'border-emerald-200 bg-emerald-50/70 text-emerald-800' : 'border-slate-200 bg-slate-50 text-slate-500')}>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {suggestion.decision === 'accepted' ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5" />}
+                          <span className="font-semibold">{suggestion.decision === 'accepted' ? '已采纳记忆译文' : '已拒绝，保留原文'}（{suggestion.decidedAt ? new Date(suggestion.decidedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}）</span>
+                          <button className="ml-auto text-blue-600 hover:underline" onClick={(event) => { event.stopPropagation(); resetSuggestion(suggestion) }}>重新决定</button>
+                        </div>
+                        <p className="mt-1">来源文档：{suggestion.sourceDocument}{suggestion.sourceSegmentLabel ? ` · ${suggestion.sourceSegmentLabel}` : ''}</p>
+                      </div>
+                    )}
                   </div>
                 </div>
                 {!!segmentIssues.length && <div className="border-t bg-red-50/50 px-3.5 py-2.5"><div className="space-y-1.5">{segmentIssues.map((issue) => <div key={issue.id} className="flex items-start gap-2 text-[11px]"><CircleAlert className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', issue.severity === 'error' ? 'text-red-600' : 'text-amber-600')} /><span className={issue.severity === 'error' ? 'text-red-700' : 'text-amber-700'}>{issue.message}</span></div>)}</div></div>}
@@ -412,7 +566,7 @@ export function LocalizationWorkbench() {
                 <div className="mt-4 space-y-3">{selectedDiscussions.map((discussion) => <div key={discussion.id} className="rounded-lg border p-3"><div className="flex items-center justify-between"><b className="text-xs text-slate-800">{discussion.author}</b><Badge variant={discussion.resolved ? 'success' : 'warning'}>{discussion.resolved ? '已解决' : '待回应'}</Badge></div><p className="mt-2 text-xs leading-5 text-slate-600">{discussion.body}</p><p className="mt-2 text-[10px] text-slate-400">{hydrated ? new Date(discussion.createdAt).toLocaleString('zh-CN') : null}</p></div>)}{!selectedDiscussions.length && <p className="py-8 text-center text-xs text-slate-400">当前片段还没有讨论</p>}</div>
               </TabsContent>
               <TabsContent value="issues" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-2">{issues.map((issue) => <button key={issue.id} onClick={() => selectAndScroll(issue.segmentId)} className="w-full rounded-lg border p-3 text-left hover:border-amber-300 hover:bg-amber-50"><div className="flex items-center justify-between"><Badge variant={issue.severity === 'error' ? 'destructive' : 'warning'}>{issueLabel[issue.type]}</Badge><span className="text-[10px] text-slate-400">#{segments.find((item) => item.id === issue.segmentId)?.index}</span></div><p className="mt-2 text-xs leading-5 text-slate-600">{issue.message}</p></button>)}{!issues.length && <p className="py-8 text-center text-xs text-emerald-600">没有待处理问题</p>}</div></TabsContent>
-              <TabsContent value="history" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-0">{history.map((entry) => <div key={entry.id} className="relative border-l border-slate-200 pb-4 pl-4"><span className="absolute -left-1.5 top-0 h-3 w-3 rounded-full border-2 border-white bg-blue-500" /><div className="flex items-center justify-between"><b className="text-[11px] text-slate-700">{entry.author}</b><span className="text-[9px] text-slate-400">{hydrated ? new Date(entry.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : null}</span></div><p className="mt-1 text-[10px] text-slate-500">片段 #{segments.find((item) => item.id === entry.segmentId)?.index ?? '—'} · {entry.action}</p>{entry.after && <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-400">{entry.after}</p>}</div>)}</div></TabsContent>
+              <TabsContent value="history" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-0">{history.map((entry) => <div key={entry.id} className="relative border-l border-slate-200 pb-4 pl-4"><span className="absolute -left-1.5 top-0 h-3 w-3 rounded-full border-2 border-white bg-blue-500" /><div className="flex items-center justify-between"><b className="text-[11px] text-slate-700">{entry.author}</b><span className="text-[9px] text-slate-400">{hydrated ? new Date(entry.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : null}</span></div><p className="mt-1 text-[10px] text-slate-500">片段 #{segments.find((item) => item.id === entry.segmentId)?.index ?? '—'} · {historyActionLabel[entry.action]}</p>{entry.after && <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-400">{entry.after}</p>}</div>)}</div></TabsContent>
               <TabsContent value="conflicts" className="m-0 max-h-[calc(100vh-160px)] overflow-auto p-3"><div className="space-y-3">{conflicts.map((conflict) => <div key={conflict.id} className="overflow-hidden rounded-lg border border-red-200"><div className="bg-red-50 px-3 py-2"><b className="text-xs text-red-800">片段 #{segments.find((item) => item.id === conflict.segmentId)?.index} 存在并发修改</b><p className="mt-1 text-[10px] text-red-600">{conflict.remoteAuthor} 修改了同一句</p></div><div className="space-y-2 p-3"><div><span className="text-[9px] font-semibold text-slate-400">本地版本</span><p className="mt-1 text-[11px] leading-5 text-slate-600">{conflict.localText}</p></div><div><span className="text-[9px] font-semibold text-slate-400">远端版本</span><p className="mt-1 text-[11px] leading-5 text-blue-700">{conflict.remoteText}</p></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => resolveConflict(conflict, 'local')}>保留本地</Button><Button size="sm" onClick={() => resolveConflict(conflict, 'remote')}>采用远端</Button></div></div></div>)}{!conflicts.length && <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-center text-xs text-emerald-700"><Check className="mx-auto mb-2 h-5 w-5" />所有冲突已解决</div>}</div></TabsContent>
             </Tabs>
           </Card>

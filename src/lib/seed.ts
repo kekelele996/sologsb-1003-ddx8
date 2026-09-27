@@ -1,4 +1,4 @@
-import type { Discussion, GlossaryTerm, HistoryEntry, LocalizationDocument, Segment, TranslationConflict } from './types'
+import type { Discussion, GlossaryTerm, HistoryEntry, LocalizationDocument, Segment, TranslationConflict, TranslationMemoryEntry } from './types'
 
 export const seedSegments: Segment[] = [
   { id: 'seg-01', index: 1, kind: 'heading', sourceText: '# Deployment Guide', targetText: '# 部署指南', status: 'confirmed', protectedTokens: [], note: '保留 Markdown 标题层级。' },
@@ -35,6 +35,56 @@ export const seedHistory: HistoryEntry[] = [
 export const seedConflicts: TranslationConflict[] = [
   { id: 'cf-01', segmentId: 'seg-05', localText: '安装 operator 时需要集群管理员权限。生产环境建议使用专用的服务账号。', remoteText: '安装 Operator 时需要集群管理员权限。生产环境应使用专用服务账号。', remoteAuthor: '远端协作者 · Alex', createdAt: Date.now() - 1200000 },
   { id: 'cf-02', segmentId: 'seg-09', localText: '详细诊断请参阅 [故障排查](https://docs.example.com/troubleshooting)。', remoteText: '详细诊断请参阅 [故障排查](https://docs.example.com/troubleshooting#connectivity)。', remoteAuthor: 'MSW 模拟审校者', createdAt: Date.now() - 900000 },
+]
+
+// 翻译记忆：来自其它文档的已确认译文，导入时按“忽略多余空白与大小写”的源文匹配。
+export const seedTranslationMemory: TranslationMemoryEntry[] = [
+  {
+    id: 'tm-01',
+    sourceText: '## Upgrade Notes',
+    targetText: '## 升级说明',
+    sourceDocument: 'docs/release-notes/v2.3.md',
+    sourceSegmentLabel: '第 12 段',
+    author: '译者 · 李然',
+    confirmedAt: Date.now() - 8 * 86400000,
+  },
+  {
+    id: 'tm-02',
+    sourceText: 'For more information, see the official documentation and release notes.',
+    targetText: '更多信息请参阅官方文档与发行说明。',
+    sourceDocument: 'docs/getting-started.md',
+    sourceSegmentLabel: '第 8 段',
+    author: '译者 · 王澈',
+    confirmedAt: Date.now() - 5 * 86400000,
+  },
+  {
+    id: 'tm-03',
+    sourceText: 'If the controller cannot reach the API server, check the network policy and then restart the pod.',
+    // 旧译文使用了术语表更新前的译法：operator 未大写、Pod 写作小写 → 命中冲突。
+    targetText: '如果控制器无法连接 API 服务器，请检查网络策略，然后重启 pod。',
+    sourceDocument: 'docs/v1/troubleshooting.md',
+    sourceSegmentLabel: '第 21 段',
+    author: '译者 · 王澈',
+    confirmedAt: Date.now() - 20 * 86400000,
+  },
+  {
+    id: 'tm-04',
+    sourceText: 'This project is licensed under the Apache License 2.0.',
+    targetText: '本项目基于 Apache License 2.0 许可证。',
+    sourceDocument: 'README.md',
+    sourceSegmentLabel: '许可证章节',
+    author: '译者 · 李然',
+    confirmedAt: Date.now() - 12 * 86400000,
+  },
+  {
+    id: 'tm-05',
+    sourceText: 'Thank you to all contributors who helped improve this guide.',
+    targetText: '感谢所有帮助改进本指南的贡献者。',
+    sourceDocument: 'CONTRIBUTING.md',
+    sourceSegmentLabel: '致谢章节',
+    author: '审校 · Maya',
+    confirmedAt: Date.now() - 3 * 86400000,
+  },
 ]
 
 export const seedDocument: LocalizationDocument = {
