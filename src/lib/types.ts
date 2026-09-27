@@ -44,10 +44,28 @@ export interface HistoryEntry {
   id: string
   segmentId: string
   author: string
-  action: 'edit' | 'confirm' | 'return' | 'resolve-conflict' | 'import' | 'discussion'
+  action: 'edit' | 'confirm' | 'return' | 'resolve-conflict' | 'import' | 'discussion' | 'apply-memory'
   before: string
   after: string
   createdAt: number
+}
+
+export interface MemoryEntry {
+  id: string
+  sourceText: string
+  normalizedSource: string
+  targetText: string
+  documentTitle: string
+  updatedAt: number
+}
+
+export interface MemorySuggestion {
+  segmentId: string
+  targetText: string
+  sourceDocument: string
+  matchedSource: string
+  glossaryConflicts: string[]
+  decision: 'pending' | 'accepted' | 'rejected'
 }
 
 export interface TranslationConflict {
